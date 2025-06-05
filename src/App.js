@@ -70,14 +70,29 @@ function App() {
 
   const connectToRoom = async () => {
     try {
-      const server_url = process.env.REACT_APP_TOKEN_SERVER_URL || 'http://localhost:8000/api/token/gauri?';
+      const server_url = process.env.REACT_APP_TOKEN_SERVER_URL || 'http://localhost:8000/api/token/mre-incoming';
       const userId = `user-${Math.random().toString(36).substring(2, 8)}`;
       const roomId = `room-${Math.random().toString(36).substring(2, 8)}`;
 
-      const fullUrl = `${server_url}room=${roomId}&user=${userId}&prompt=${encodeURIComponent(settings.prompt)}&instructions=${encodeURIComponent(settings.startingInstructions)}`;
-      console.log("Connecting to:", fullUrl);
+      console.log("Connecting to:", server_url);
 
-      const resp = await fetch(fullUrl);
+      const resp = await fetch(server_url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          room: roomId,
+          user: userId,
+          prompt: settings.prompt,
+          instructions: settings.startingInstructions
+        })
+      });
+
+      if (!resp.ok) {
+        throw new Error(`HTTP error! status: ${resp.status}`);
+      }
+
       const data = await resp.json();
       const token = data.token;
 
