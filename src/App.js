@@ -14,15 +14,72 @@ function App() {
   const [chatMessages, setChatMessages] = useState([]);
   const [showSettings, setShowSettings] = useState(false);
   const [settings, setSettings] = useState({
-    prompt: localStorage.getItem('agentPrompt') || defaultPrompt,
-    startingInstructions: localStorage.getItem('agentInstructions') || defaultInstructions
+    prompt: defaultPrompt,
+    startingInstructions: defaultInstructions
   });
+  const [promptHistory, setPromptHistory] = useState([]);
+  const [maxHistoryCount, setMaxHistoryCount] = useState(5);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [expandedItems, setExpandedItems] = useState(new Set());
 
-  // Save settings to localStorage when they change
+  // Load settings and history from memory on component mount
+  useEffect(() => {
+    const savedSettings = {
+      prompt: localStorage.getItem('agentPrompt') || defaultPrompt,
+      startingInstructions: localStorage.getItem('agentInstructions') || defaultInstructions
+    };
+    setSettings(savedSettings);
+
+    const savedMaxCount = localStorage.getItem('maxHistoryCount');
+    if (savedMaxCount) {
+      setMaxHistoryCount(parseInt(savedMaxCount));
+    }
+  }, []);
+
+  // Save settings when they change
   useEffect(() => {
     localStorage.setItem('agentPrompt', settings.prompt);
     localStorage.setItem('agentInstructions', settings.startingInstructions);
   }, [settings]);
+
+  // Save max history count when it changes
+  useEffect(() => {
+    localStorage.setItem('maxHistoryCount', maxHistoryCount.toString());
+  }, [maxHistoryCount]);
+
+  // Fetch prompt history from server
+  const fetchPromptHistory = async () => {
+    setLoadingHistory(true);
+    try {
+      const server_url = process.env.REACT_APP_TOKEN_SERVER_URL || 'http://localhost:8000';
+      const response = await fetch(`${server_url}limit=${maxHistoryCount}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setPromptHistory(data.history || []);
+      } else {
+        console.warn('Failed to fetch prompt history');
+        setPromptHistory([]);
+      }
+    } catch (error) {
+      console.warn('Error fetching prompt history:', error);
+      setPromptHistory([]);
+    } finally {
+      setLoadingHistory(false);
+    }
+  };
+
+  // Load history when settings panel opens or max count changes
+  useEffect(() => {
+    if (showSettings) {
+      fetchPromptHistory();
+    }
+  }, [showSettings, maxHistoryCount]);
 
   useEffect(() => {
     if (!room) return;
@@ -141,6 +198,60 @@ function App() {
     }
   };
 
+  const loadPromptFromHistory = (historyItem) => {
+    setSettings({
+      prompt: historyItem.prompt,
+      startingInstructions: historyItem.instructions
+    });
+  };
+
+  const formatDate = (dateString) => {
+    let date;
+    
+    // Handle different date formats from your API
+    if (typeof dateString === 'object' && dateString.$numberLong) {
+      // MongoDB timestamp format
+      date = new Date(parseInt(dateString.$numberLong));
+    } else if (typeof dateString === 'string' && dateString.includes('-')) {
+      // ISO string format
+      date = new Date(dateString);
+    } else if (typeof dateString === 'number') {
+      // Unix timestamp
+      date = new Date(dateString * 1000);
+    } else {
+      // Try to parse as is
+      date = new Date(dateString);
+    }
+    
+    // Check if date is valid
+    if (isNaN(date.getTime())) {
+      return 'Invalid Date';
+    }
+    
+    return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], {
+      hour: '2-digit', 
+      minute: '2-digit'
+    });
+  };
+
+  const truncateText = (text, maxLength = 80) => {
+    if (text.length <= maxLength) return text;
+    return text.substring(0, maxLength) + '...';
+  };
+
+  // Add this function to handle expanding/collapsing items
+  const toggleExpanded = (itemId) => {
+    setExpandedItems(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(itemId)) {
+        newSet.delete(itemId);
+      } else {
+        newSet.add(itemId);
+      }
+      return newSet;
+    });
+  };
+
   return (
     <div className="app-container">
       <header className="app-header">
@@ -156,6 +267,108 @@ function App() {
       {showSettings && (
         <div className="settings-panel">
           <h2>Agent Settings</h2>
+          
+          {/* History Count Setting */}
+          <div className="form-group">
+            <label htmlFor="maxHistoryCount">Number of recent prompts to show:</label>
+            <select
+              id="maxHistoryCount"
+              value={maxHistoryCount}
+              onChange={(e) => setMaxHistoryCount(parseInt(e.target.value))}
+              className="history-count-select"
+            >
+              <option value={3}>3</option>
+              <option value={5}>5</option>
+              <option value={10}>10</option>
+              <option value={15}>15</option>
+              <option value={20}>20</option>
+            </select>
+          </div>
+
+          {/* Prompt History Section */}
+          <div className="form-group">
+            <div className="history-header">
+              <label>Recent Prompts:</label>
+              <button 
+                onClick={fetchPromptHistory}
+                className="refresh-button"
+                disabled={loadingHistory}
+              >
+                {loadingHistory ? 'Loading...' : 'Refresh'}
+              </button>
+            </div>
+            
+            <div className="prompt-history">
+              {loadingHistory ? (
+                <div className="loading">
+                  <div className="loading-dot"></div>
+                  <div className="loading-dot"></div>
+                  <div className="loading-dot"></div>
+                </div>
+              ) : promptHistory.length > 0 ? (
+                promptHistory.map((item, index) => {
+                  const itemId = item._id || `item-${index}`;
+                  const isExpanded = expandedItems.has(itemId);
+                  
+                  return (
+                    <div key={itemId} className="history-item">
+                      <div 
+                        className="history-item-header"
+                        onClick={() => toggleExpanded(itemId)}
+                      >
+                        <div className="history-preview">
+                          <div className="history-prompt-preview">
+                            {truncateText(item.prompt, 60)}
+                          </div>
+                          <div className="history-instructions-preview">
+                            {truncateText(item.instructions, 80)}
+                          </div>
+                        </div>
+                        <div className="history-meta">
+                          <div className="history-date">
+                            {formatDate(item.created_at)}
+                          </div>
+                          <button 
+                            className={`expand-button ${isExpanded ? 'expanded' : ''}`}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              toggleExpanded(itemId);
+                            }}
+                          >
+                            ▼
+                          </button>
+                        </div>
+                      </div>
+                      
+                      {isExpanded && (
+                        <div className="history-item-content">
+                          <div className="history-content-section">
+                            <span className="history-content-label">Prompt:</span>
+                            <div className="history-content-text">{item.prompt}</div>
+                          </div>
+                          
+                          <div className="history-content-section">
+                            <span className="history-content-label">Instructions:</span>
+                            <div className="history-content-text">{item.instructions}</div>
+                          </div>
+                          
+                          <button 
+                            onClick={() => loadPromptFromHistory(item)}
+                            className="use-prompt-button"
+                          >
+                            Use This Prompt
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              ) : (
+                <div className="no-history">No recent prompts found</div>
+              )}
+            </div>
+          </div>
+
           <div className="form-group">
             <label htmlFor="prompt">Agent Prompt:</label>
             <textarea
