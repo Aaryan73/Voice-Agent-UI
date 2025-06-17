@@ -21,6 +21,16 @@ function App() {
   const [maxHistoryCount, setMaxHistoryCount] = useState(5);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [expandedItems, setExpandedItems] = useState(new Set());
+  
+  // New states for transcript and feedback
+  const [currentDocumentId, setCurrentDocumentId] = useState(null);
+  const [showTranscript, setShowTranscript] = useState(false);
+  const [transcript, setTranscript] = useState([]);
+  const [loadingTranscript, setLoadingTranscript] = useState(false);
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+  const [submittingFeedback, setSubmittingFeedback] = useState(false);
+  const [transcriptError, setTranscriptError] = useState(false);
+  const [transcriptLoadingProgress, setTranscriptLoadingProgress] = useState(0);
 
   // Load settings and history from memory on component mount
   useEffect(() => {
@@ -51,8 +61,8 @@ function App() {
   const fetchPromptHistory = async () => {
     setLoadingHistory(true);
     try {
-      const server_url = process.env.REACT_APP_TOKEN_SERVER_URL || 'http://localhost:8000';
-      const response = await fetch(`${server_url}limit=${maxHistoryCount}`, {
+      const server_url = getBaseServerUrl();
+      const response = await fetch(`${server_url}/api/token/mre-incoming?limit=${maxHistoryCount}`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
@@ -72,6 +82,148 @@ function App() {
     } finally {
       setLoadingHistory(false);
     }
+  };
+  
+  // Helper function to get base server URL
+  const getBaseServerUrl = () => {
+    const envUrl = process.env.REACT_APP_TOKEN_SERVER_URL || 'http://localhost:8000';
+    // Remove any trailing endpoint paths to get just the base URL
+    return envUrl.replace(/\/api\/.*$/, '');
+  };
+
+  // Fetch conversation transcript with retry logic
+  const fetchTranscriptWithRetry = async (documentId) => {
+    const maxRetries = 30; // 20 seconds max wait time
+    const retryInterval = 1000; // 1 second between retries
+    let retryCount = 0;
+
+    setLoadingTranscript(true);
+    setTranscriptError(false);
+    setTranscriptLoadingProgress(0);
+
+    const attemptFetch = async () => {
+      try {
+        const server_url = getBaseServerUrl();
+        const response = await fetch(`${server_url}/api/conversation/${documentId}`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
+          }
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          if (data.conversation && data.conversation.length > 0) {
+            setTranscript(data.conversation);
+            setLoadingTranscript(false);
+            return true; // Success
+          }
+        }
+        
+        // If we get here, transcript is not ready yet
+        retryCount++;
+        setTranscriptLoadingProgress((retryCount / maxRetries) * 100);
+        
+        if (retryCount >= maxRetries) {
+          // Max retries reached
+          setTranscriptError(true);
+          setLoadingTranscript(false);
+          setTranscript([]);
+          return false;
+        }
+        
+        // Wait and retry
+        setTimeout(attemptFetch, retryInterval);
+        return null; // Continue retrying
+        
+      } catch (error) {
+        console.warn('Error fetching transcript:', error);
+        retryCount++;
+        setTranscriptLoadingProgress((retryCount / maxRetries) * 100);
+        
+        if (retryCount >= maxRetries) {
+          setTranscriptError(true);
+          setLoadingTranscript(false);
+          setTranscript([]);
+          return false;
+        }
+        
+        setTimeout(attemptFetch, retryInterval);
+        return null;
+      }
+    };
+
+    await attemptFetch();
+  };
+
+  // Original fetch function (keeping for backward compatibility)
+  const fetchTranscript = async (documentId) => {
+    setLoadingTranscript(true);
+    try {
+      const server_url = getBaseServerUrl();
+      const response = await fetch(`${server_url}/api/conversation/${documentId}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        setTranscript(data.conversation || []);
+      } else {
+        console.warn('Failed to fetch transcript');
+        setTranscript([]);
+      }
+    } catch (error) {
+      console.warn('Error fetching transcript:', error);
+      setTranscript([]);
+    } finally {
+      setLoadingTranscript(false);
+    }
+  };
+
+  // Submit feedback
+  const submitFeedback = async (quality) => {
+    if (!currentDocumentId) return;
+    
+    setSubmittingFeedback(true);
+    try {
+      const server_url = getBaseServerUrl();
+      const response = await fetch(`${server_url}/api/conversation/${currentDocumentId}/feedback`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+
+        body: JSON.stringify({
+          document_id: currentDocumentId,
+          conversation_quality: quality,
+          feedback_comment: ""
+        })
+      });
+
+      if (response.ok) {
+        setFeedbackSubmitted(true);
+        console.log('Feedback submitted successfully');
+      } else {
+        console.error('Failed to submit feedback');
+      }
+    } catch (error) {
+      console.error('Error submitting feedback:', error);
+    } finally {
+      setSubmittingFeedback(false);
+    }
+  };
+
+  // Reset transcript and feedback state
+  const resetTranscriptState = () => {
+    setShowTranscript(false);
+    setTranscript([]);
+    setCurrentDocumentId(null);
+    setFeedbackSubmitted(false);
+    setTranscriptError(false);
+    setTranscriptLoadingProgress(0);
   };
 
   // Load history when settings panel opens or max count changes
@@ -126,14 +278,18 @@ function App() {
   }, [room]);
 
   const connectToRoom = async () => {
+    // Reset transcript state when starting a new call
+    resetTranscriptState();
+    
     try {
-      const server_url = process.env.REACT_APP_TOKEN_SERVER_URL || 'http://localhost:8000/api/token/mre-incoming';
+      const server_url = getBaseServerUrl();
+      const token_endpoint = `${server_url}/api/token/mre-incoming`;
       const userId = `user-${Math.random().toString(36).substring(2, 8)}`;
       const roomId = `room-${Math.random().toString(36).substring(2, 8)}`;
 
-      console.log("Connecting to:", server_url);
+      console.log("Connecting to:", token_endpoint);
 
-      const resp = await fetch(server_url, {
+      const resp = await fetch(token_endpoint, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -152,6 +308,17 @@ function App() {
 
       const data = await resp.json();
       const token = data.token;
+
+      // Extract document ID from the token metadata
+      try {
+        const tokenPayload = JSON.parse(atob(token.split('.')[1]));
+        if (tokenPayload.metadata) {
+          const metadata = JSON.parse(tokenPayload.metadata);
+          setCurrentDocumentId(metadata.document_id);
+        }
+      } catch (e) {
+        console.warn('Could not extract document ID from token');
+      }
 
       const newRoom = new Room();
       console.log("Connecting to:", process.env.REACT_APP_LIVEKIT_WS_URL);
@@ -178,6 +345,12 @@ function App() {
       setRoom(null);
       setChatMessages([]);
       console.log('Disconnected.');
+      
+      // Show transcript loading and fetch with retry
+      if (currentDocumentId) {
+        setShowTranscript(true);
+        await fetchTranscriptWithRetry(currentDocumentId);
+      }
     }
   };
 
@@ -250,6 +423,17 @@ function App() {
       }
       return newSet;
     });
+  };
+
+  const formatTranscriptContent = (content) => {
+    if (typeof content === 'string') {
+      return content;
+    } else if (typeof content === 'object' && content.text) {
+      return content.text;
+    } else if (Array.isArray(content) && content.length > 0) {
+      return content[0].text || content[0];
+    }
+    return 'No content available';
   };
 
   return (
@@ -409,7 +593,7 @@ function App() {
       )}
 
       <div className="main-content">
-        {!connected ? (
+        {!connected && !showTranscript ? (
           <button 
             onClick={connectToRoom} 
             className="call-button start-call"
@@ -417,14 +601,14 @@ function App() {
           >
             Start Call
           </button>
-        ) : (
+        ) : connected ? (
           <button 
             onClick={disconnectFromRoom} 
             className="call-button end-call"
           >
             End Call
           </button>
-        )}
+        ) : null}
 
         {connected && (
           <div className="call-ui">
@@ -449,6 +633,132 @@ function App() {
                 )}
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Transcript Section */}
+        {showTranscript && (
+          <div className="transcript-section">
+            <div className="transcript-header">
+              <h2>Conversation Transcript</h2>
+              <button 
+                onClick={() => {
+                  resetTranscriptState();
+                }}
+                className="new-call-button"
+              >
+                Start New Call
+              </button>
+            </div>
+
+            {loadingTranscript ? (
+              <div className="transcript-loading">
+                <div className="transcript-loading-container">
+                  <div className="transcript-loading-spinner">
+                    <div className="spinner-ring"></div>
+                    <div className="spinner-ring"></div>
+                    <div className="spinner-ring"></div>
+                    <div className="spinner-ring"></div>
+                  </div>
+                  <h3>Processing Conversation...</h3>
+                  <p>Please wait while we prepare your transcript</p>
+                  <div className="progress-bar">
+                    <div 
+                      className="progress-fill" 
+                      style={{ width: `${transcriptLoadingProgress}%` }}
+                    ></div>
+                  </div>
+                  <div className="progress-text">
+                    {Math.round(transcriptLoadingProgress)}% - Checking for transcript availability...
+                  </div>
+                </div>
+              </div>
+            ) : transcriptError ? (
+              <div className="transcript-error">
+                <div className="error-icon">⚠️</div>
+                <h3>Transcript Unavailable</h3>
+                <p>We couldn't retrieve the conversation transcript at this time.</p>
+                <p>This might happen if:</p>
+                <ul>
+                  <li>The conversation was too short</li>
+                  <li>There was a technical issue during processing</li>
+                  <li>The transcript is still being processed (try again later)</li>
+                </ul>
+                <button 
+                  onClick={() => {
+                    if (currentDocumentId) {
+                      fetchTranscriptWithRetry(currentDocumentId);
+                    }
+                  }}
+                  className="retry-button"
+                >
+                  Try Again
+                </button>
+              </div>
+            ) : transcript.length > 0 ? (
+              <div className="transcript-container">
+                <div className="transcript-messages">
+                  {transcript.map((message, index) => (
+                    <div 
+                      key={message.id || index} 
+                      className={`transcript-message ${message.role === 'user' ? 'user-transcript' : 'assistant-transcript'}`}
+                    >
+                      <div className="transcript-role">
+                        {message.role === 'user' ? 'You' : 'Assistant'}
+                      </div>
+                      <div className="transcript-content">
+                        {formatTranscriptContent(message.content)}
+                      </div>
+                      {message.interrupted && (
+                        <div className="transcript-interrupted">
+                          (Interrupted)
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Feedback Section */}
+                {!feedbackSubmitted ? (
+                  <div className="feedback-section">
+                    <h3>How was this conversation?</h3>
+                    <div className="feedback-buttons">
+                      <button 
+                        onClick={() => submitFeedback('Good')}
+                        className="feedback-button thumbs-up"
+                        disabled={submittingFeedback}
+                      >
+                        <span className="feedback-icon">👍</span>
+                        <span>Good</span>
+                      </button>
+                      <button 
+                        onClick={() => submitFeedback('Bad')}
+                        className="feedback-button thumbs-down"
+                        disabled={submittingFeedback}
+                      >
+                        <span className="feedback-icon">👎</span>
+                        <span>Bad</span>
+                      </button>
+                    </div>
+                    {submittingFeedback && (
+                      <div className="feedback-submitting">
+                        Submitting feedback...
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="feedback-submitted">
+                    <h3>Thank you for your feedback! 🎉</h3>
+                    <p>Your feedback helps us improve the AI assistant.</p>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="no-transcript">
+                <p>No conversation transcript available.</p>
+                <p>The transcript may still be processing or the conversation was too short.</p>
+              </div>
+            )}
           </div>
         )}
       </div>
