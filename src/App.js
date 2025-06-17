@@ -93,13 +93,18 @@ function App() {
 
   // Fetch conversation transcript with retry logic
   const fetchTranscriptWithRetry = async (documentId) => {
-    const maxRetries = 30; // 20 seconds max wait time
+    const maxRetries = 30; // 30 seconds max wait time (after initial delay)
     const retryInterval = 1000; // 1 second between retries
+    const initialDelay = 10000; // 10 seconds initial delay
     let retryCount = 0;
 
     setLoadingTranscript(true);
     setTranscriptError(false);
     setTranscriptLoadingProgress(0);
+
+    // Wait 5 seconds before the first attempt
+    console.log('Waiting 5 seconds before fetching transcript...');
+    await new Promise(resolve => setTimeout(resolve, initialDelay));
 
     const attemptFetch = async () => {
       try {
